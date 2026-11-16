@@ -1,64 +1,108 @@
-// server.js
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs'); // This scrambles the passwords
+
+// Import your database rules (Schemas)
+const User = require('./models/User');
+const Blog = require('./models/Blog');
 
 const app = express();
 
-// Middleware
-app.use(cors()); // Allows frontend (running on a different port/file) to connect
-app.use(express.json()); // Automatically parses incoming JSON data from the frontend
+app.use(cors());
+app.use(express.json());
 
-// Temporary in-memory databases
-const users = [];
-const blogs = [];
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI, { family: 4 })
+    .then(() => console.log('Successfully connected to MongoDB!'))
+    .catch((error) => console.error('MongoDB connection error:', error));
 
-// --- 1. User Registration API ---
-app.post('/register', (req, res) => {
-    const { name, email, password } = req.body;
+// --- 1. User Registration (Secure Hashing) ---
+app.post('/register', async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
 
-    // Check if the user already exists
-    const userExists = users.find(user => user.email === email);
-    if (userExists) {
-        return res.status(400).json({ error: "Email already registered" });
+        // Ask DB: Does this email already exist?
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ error: "Email already registered" });
+        }
+
+        // Security: Scramble the password before saving
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Save new user to the DB
+        const newUser = new User({ name, email, password: hashedPassword });
+        await newUser.save(); // .save() writes it to MongoDB permanently
+
+        res.status(201).json({ message: "Registration successful!" });
+    } catch (error) {
+        res.status(500).json({ error: "Server error during registration" });
     }
-
-    // Save the new user
-    users.push({ name, email, password });
-    res.status(201).json({ message: "Registration successful!" });
 });
 
-// --- 2. User Login API ---
-app.post('/login', (req, res) => {
-    const { email, password } = req.body;
+// --- 2. User Login (Secure Comparison) ---
+app.post('/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
 
-    // Find the user by email
-    const user = users.find(user => user.email === email);
-    
-    // Check if user exists and password matches
-    if (!user || user.password !== password) {
-        return res.status(401).json({ error: "Invalid email or password" });
+        // Ask DB: Find the user by this email
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(401).json({ error: "Invalid email or password" });
+        }
+
+        // Security: Compare the typed password with the scrambled one in the DB
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+            return res.status(401).json({ error: "Invalid email or password" });
+        }
+
+        res.status(200).json({ message: "Login successful!", name: user.name });
+    } catch (error) {
+        res.status(500).json({ error: "Server error during login" });
     }
-
-    res.status(200).json({ message: "Login successful!", name: user.name });
 });
 
 // --- 3. Create Blog API ---
-app.post('/blogs', (req, res) => {
-    const { title, content, author } = req.body;
+app.post('/blogs', async (req, res) => {
+    try {
+        const { title, content, author } = req.body;
 
-    if (!title || !content) {
-        return res.status(400).json({ error: "Title and content are required" });
+        const newBlog = new Blog({ title, content, author: author || "Anonymous" });
+        await newBlog.save(); // Writes blog to MongoDB
+
+        res.status(201).json({ message: "Blog published successfully!", blog: newBlog });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to create blog" });
     }
-
-    const newBlog = { id: Date.now(), title, content, author: author || "Anonymous" };
-    blogs.push(newBlog);
-    
-    res.status(201).json({ message: "Blog published successfully!", blog: newBlog });
 });
 
-// --- 4. Get All Blogs API (Needed for your Dashboard) ---
-app.get('/blogs', (req, res) => {
-    res.status(200).json(blogs);
+// --- 4. Get All Blogs API ---
+app.get('/blogs', async (req, res) => {
+    try {
+        // .find() gets all blogs, .sort() orders them newest first
+        const blogs = await Blog.find().sort({ createdAt: -1 }); 
+        res.status(200).json(blogs);
+    } catch (error) {
+        res.status(500).json({ error: "Failed to fetch blogs" });
+    }
+});
+
+// --- 5. Get Single Blog API (For Objective 4) ---
+app.get('/blogs/:id', async (req, res) => {
+    try {
+        // req.params.id grabs the ID from the URL
+        const blog = await Blog.findById(req.params.id);
+        if (!blog) {
+            return res.status(404).json({ error: "Blog not found" });
+        }
+        res.status(200).json(blog);
+    } catch (error) {
+        res.status(500).json({ error: "Invalid blog ID" });
+    }
 });
 
 // Start the server
